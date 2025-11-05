@@ -106,7 +106,8 @@ class MatrixCipher:
             for i in range(self.block_size):
                 row = []
                 for j in range(self.block_size):
-                    row.append(gen.next_int_range(1, 100))
+                    # Генерируем небольшие числа для лучшей обратимости
+                    row.append(gen.next_int_range(1, 10))
                 matrix.append(row)
 
             # Проверяем, что матрица обратима (определитель != 0)
@@ -120,15 +121,17 @@ class MatrixCipher:
     def encrypt_block(self, block, key_matrix):
         """Шифрование одного блока матричным методом"""
         if len(block) != self.block_size:
-            raise ValueError(f"Размер блока должен быть {self.block_size} байт")
+            # Дополняем блок если необходимо
+            padding = self.block_size - len(block)
+            block = block + bytes([0] * padding)
 
         # Преобразуем блок в вектор
-        vector = [ord(byte) if isinstance(byte, str) else byte for byte in block]
+        vector = [byte for byte in block]
 
         # Умножаем матрицу на вектор
         result_vector = np.dot(key_matrix, vector)
 
-        # Преобразуем результат обратно в байты
+        # Преобразуем результат обратно в байты с модульной арифметикой
         encrypted_block = bytes(int(round(x)) % 256 for x in result_vector)
 
         return encrypted_block
@@ -144,8 +147,9 @@ class MatrixCipher:
         # Умножаем обратную матрицу на вектор
         result_vector = np.dot(inv_key_matrix, vector)
 
-        # Преобразуем результат обратно в байты
-        decrypted_block = bytes(int(round(x)) % 256 for x in result_vector)
+        # Преобразуем результат обратно в байты с модульной арифметикой
+        # и округлением для компенсации ошибок вычислений с плавающей точкой
+        decrypted_block = bytes(max(0, min(255, int(round(x)))) for x in result_vector)
 
         return decrypted_block
 
@@ -429,12 +433,10 @@ class CryptoApp:
 
             if mode == "matrix":
                 # Матричное шифрование (простой режим)
-                blocks = [file_data[i:i + self.block_size] for i in range(0, len(file_data), self.block_size)]
-
-                # Дополняем последний блок если необходимо
-                if len(blocks[-1]) < self.block_size:
-                    padding = self.block_size - len(blocks[-1])
-                    blocks[-1] = blocks[-1] + bytes([0] * padding)
+                blocks = []
+                for i in range(0, len(file_data), self.block_size):
+                    block = file_data[i:i + self.block_size]
+                    blocks.append(block)
 
                 encrypted_blocks = []
                 total_blocks = len(blocks)
@@ -456,17 +458,19 @@ class CryptoApp:
                 mode_name = "Режим CBC"
                 self.progress_var.set(100)
 
+            # Показываем информацию о результате
             self.file_info_text.delete(1.0, tk.END)
             self.file_info_text.insert(tk.END, f"Файл зашифрован: {self.current_file}\n")
             self.file_info_text.insert(tk.END, f"Режим: {mode_name}\n")
             self.file_info_text.insert(tk.END, f"Исходный размер: {len(file_data)} байт\n")
             self.file_info_text.insert(tk.END, f"Зашифрованный размер: {len(self.processed_data)} байт\n")
-            self.file_info_text.insert(tk.END, f"Пароль: {password}\n")
-            self.file_info_text.insert(tk.END, f"Seed (из хеша пароля): {seed}\n")
             self.file_info_text.insert(tk.END, f"Размер блока: {self.block_size} байт\n")
 
-            if mode == "cbc":
-                self.file_info_text.insert(tk.END, f"IV (hex): {self.iv.hex()}\n")
+            # Показываем превью зашифрованных данных
+            hex_preview = self.processed_data[:100].hex()
+            self.file_info_text.insert(tk.END, f"\nПревью (hex):\n{hex_preview}")
+            if len(self.processed_data) > 100:
+                self.file_info_text.insert(tk.END, "\n... (данные обрезаны)")
 
             self.status_var.set(f"Файл зашифрован ({mode_name})")
 
@@ -501,7 +505,10 @@ class CryptoApp:
 
             if mode == "matrix":
                 # Матричное дешифрование (простой режим)
-                blocks = [encrypted_data[i:i + self.block_size] for i in range(0, len(encrypted_data), self.block_size)]
+                blocks = []
+                for i in range(0, len(encrypted_data), self.block_size):
+                    block = encrypted_data[i:i + self.block_size]
+                    blocks.append(block)
 
                 decrypted_blocks = []
                 total_blocks = len(blocks)
@@ -523,23 +530,24 @@ class CryptoApp:
                 mode_name = "Режим CBC"
                 self.progress_var.set(100)
 
+            # Показываем информацию о результате
             self.file_info_text.delete(1.0, tk.END)
             self.file_info_text.insert(tk.END, f"Файл расшифрован: {self.current_file}\n")
             self.file_info_text.insert(tk.END, f"Режим: {mode_name}\n")
             self.file_info_text.insert(tk.END, f"Размер данных: {len(self.processed_data)} байт\n")
-            self.file_info_text.insert(tk.END, f"Пароль: {password}\n")
-            self.file_info_text.insert(tk.END, f"Seed (из хеша пароля): {seed}\n")
 
             # Попытка показать превью для текста
             try:
-                text_preview = self.processed_data[:200].decode('utf-8', errors='replace')
+                # Убираем нулевые байты в конце (дополнение)
+                clean_data = self.processed_data.rstrip(b'\x00')
+                text_preview = clean_data.decode('utf-8', errors='replace')
                 self.file_info_text.insert(tk.END, f"\nПревью:\n{text_preview}")
-                if len(self.processed_data) > 200:
+                if len(text_preview) > 200:
                     self.file_info_text.insert(tk.END, "\n... (данные обрезаны)")
             except:
-                hex_preview = ' '.join(f'{b:02x}' for b in self.processed_data[:50])
+                hex_preview = self.processed_data[:100].hex()
                 self.file_info_text.insert(tk.END, f"\nПревью (hex):\n{hex_preview}")
-                if len(self.processed_data) > 50:
+                if len(self.processed_data) > 100:
                     self.file_info_text.insert(tk.END, "\n... (данные обрезаны)")
 
             self.status_var.set(f"Файл расшифрован ({mode_name})")
