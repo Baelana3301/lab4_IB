@@ -91,70 +91,148 @@ class ParkMillerGenerator:
         """Генерация случайного числа в заданном диапазоне"""
         return min_val + int(self.next_float() * (max_val - min_val + 1))
 
-
-# Класс для матричного шифрования (базовый уровень)
+# Класс для матричного шифрования с целочисленной арифметикой
 class MatrixCipher:
     def __init__(self, block_size=5):
         self.block_size = block_size
+        self.modulus = 257  # Простое число для модульной арифметики
+
+    def mod_inverse(self, a, m):
+        """Вычисление модульного обратного числа"""
+
+        def extended_gcd(a, b):
+            if a == 0:
+                return b, 0, 1
+            gcd, x1, y1 = extended_gcd(b % a, a)
+            x = y1 - (b // a) * x1
+            y = x1
+            return gcd, x, y
+
+        gcd, x, _ = extended_gcd(a % m, m)
+        if gcd != 1:
+            raise ValueError(f"Обратный элемент не существует для {a} mod {m}")
+        return (x % m + m) % m
 
     def generate_key_matrix(self, seed):
         """Генерация обратимой матрицы ключа на основе seed"""
         gen = ParkMillerGenerator(seed)
         while True:
-            # Создаем матрицу размера block_size x block_size
+            # Создаем матрицу с небольшими целыми числами
             matrix = []
             for i in range(self.block_size):
                 row = []
                 for j in range(self.block_size):
-                    # Генерируем небольшие числа для лучшей обратимости
                     row.append(gen.next_int_range(1, 10))
                 matrix.append(row)
 
-            # Проверяем, что матрица обратима (определитель != 0)
+            # Проверяем обратимость в модульной арифметике
             try:
-                det = np.linalg.det(matrix)
-                if abs(det) > 1e-10:  # Определитель не равен нулю
-                    return matrix, np.linalg.inv(matrix)
-            except:
+                # Преобразуем в numpy array для вычисления определителя
+                np_matrix = np.array(matrix, dtype=np.int64)
+                det = int(round(np.linalg.det(np_matrix)))
+
+                # Проверяем, что определитель обратим по модулю
+                if det % self.modulus == 0:
+                    continue
+
+                # Вычисляем обратную матрицу вручную для модульной арифметики
+                inv_matrix = self.compute_modular_inverse(matrix)
+                return matrix, inv_matrix
+
+            except Exception as e:
                 continue
+
+    def compute_modular_inverse(self, matrix):
+        """Вычисление обратной матрицы в модульной арифметике"""
+        n = len(matrix)
+        # Создаем расширенную матрицу [A|I]
+        augmented = []
+        for i in range(n):
+            row = []
+            for j in range(n):
+                row.append(matrix[i][j])
+            for j in range(n):
+                row.append(1 if i == j else 0)
+            augmented.append(row)
+
+        # Приводим к ступенчатому виду
+        for i in range(n):
+            # Находим ненулевой элемент в столбце i
+            pivot = i
+            while pivot < n and augmented[pivot][i] == 0:
+                pivot += 1
+            if pivot == n:
+                raise ValueError("Матрица не обратима")
+
+            # Меняем строки местами
+            augmented[i], augmented[pivot] = augmented[pivot], augmented[i]
+
+            # Нормализуем ведущую строку
+            pivot_val = augmented[i][i]
+            inv_pivot = self.mod_inverse(pivot_val, self.modulus)
+
+            for j in range(2 * n):
+                augmented[i][j] = (augmented[i][j] * inv_pivot) % self.modulus
+
+            # Обнуляем столбец в других строках
+            for k in range(n):
+                if k != i:
+                    factor = augmented[k][i]
+                    for j in range(2 * n):
+                        augmented[k][j] = (augmented[k][j] - factor * augmented[i][j]) % self.modulus
+
+        # Извлекаем обратную матрицу
+        inv_matrix = []
+        for i in range(n):
+            row = []
+            for j in range(n):
+                row.append(augmented[i][n + j])
+            inv_matrix.append(row)
+
+        return inv_matrix
 
     def encrypt_block(self, block, key_matrix):
         """Шифрование одного блока матричным методом"""
-        if len(block) != self.block_size:
-            # Дополняем блок если необходимо
+        if len(block) < self.block_size:
+            # Дополняем блок нулями
             padding = self.block_size - len(block)
             block = block + bytes([0] * padding)
 
         # Преобразуем блок в вектор
         vector = [byte for byte in block]
 
-        # Умножаем матрицу на вектор
-        result_vector = np.dot(key_matrix, vector)
+        # Умножаем матрицу на вектор с модульной арифметикой
+        result_vector = [0] * self.block_size
+        for i in range(self.block_size):
+            for j in range(self.block_size):
+                result_vector[i] = (result_vector[i] + key_matrix[i][j] * vector[j]) % self.modulus
 
-        # Преобразуем результат обратно в байты с модульной арифметикой
-        encrypted_block = bytes(int(round(x)) % 256 for x in result_vector)
+        # Преобразуем результат обратно в байты
+        encrypted_block = bytes(x % 256 for x in result_vector)
 
         return encrypted_block
 
     def decrypt_block(self, block, inv_key_matrix):
         """Дешифрование одного блока матричным методом"""
-        if len(block) != self.block_size:
-            raise ValueError(f"Размер блока должен быть {self.block_size} байт")
+        if len(block) < self.block_size:
+            raise ValueError(f"Размер блока должен быть не менее {self.block_size} байт")
 
         # Преобразуем блок в вектор
         vector = [byte for byte in block]
 
-        # Умножаем обратную матрицу на вектор
-        result_vector = np.dot(inv_key_matrix, vector)
+        # Умножаем обратную матрицу на вектор с модульной арифметикой
+        result_vector = [0] * self.block_size
+        for i in range(self.block_size):
+            for j in range(self.block_size):
+                result_vector[i] = (result_vector[i] + inv_key_matrix[i][j] * vector[j]) % self.modulus
 
-        # Преобразуем результат обратно в байты с модульной арифметикой
-        # и округлением для компенсации ошибок вычислений с плавающей точкой
-        decrypted_block = bytes(max(0, min(255, int(round(x)))) for x in result_vector)
+        # Преобразуем результат обратно в байты
+        decrypted_block = bytes(x % 256 for x in result_vector)
 
         return decrypted_block
 
 
-# Класс для режима CBC (Cipher Block Chaining)
+# Класс для режима CBC с исправлениями
 class CBCCipher:
     def __init__(self, block_cipher, block_size=5):
         self.block_cipher = block_cipher
@@ -168,12 +246,18 @@ class CBCCipher:
 
     def encrypt(self, data, key_matrix, iv):
         """Шифрование в режиме CBC"""
-        blocks = [data[i:i + self.block_size] for i in range(0, len(data), self.block_size)]
+        blocks = []
+        for i in range(0, len(data), self.block_size):
+            block = data[i:i + self.block_size]
+            blocks.append(block)
 
-        # Дополняем последний блок если необходимо
+        # Дополняем последний блок по стандарту PKCS7
         if len(blocks[-1]) < self.block_size:
             padding = self.block_size - len(blocks[-1])
             blocks[-1] = blocks[-1] + bytes([padding] * padding)
+        else:
+            # Добавляем целый блок дополнения если блок полный
+            blocks.append(bytes([self.block_size] * self.block_size))
 
         encrypted_blocks = []
         prev_block = iv
@@ -197,7 +281,10 @@ class CBCCipher:
         iv = data[:self.block_size]
         encrypted_data = data[self.block_size:]
 
-        blocks = [encrypted_data[i:i + self.block_size] for i in range(0, len(encrypted_data), self.block_size)]
+        blocks = []
+        for i in range(0, len(encrypted_data), self.block_size):
+            block = encrypted_data[i:i + self.block_size]
+            blocks.append(block)
 
         decrypted_blocks = []
         prev_block = iv
@@ -211,13 +298,14 @@ class CBCCipher:
             decrypted_blocks.append(xor_block)
             prev_block = block
 
-        # Убираем дополнение
+        # Убираем дополнение PKCS7
         result = b''.join(decrypted_blocks)
-        padding = result[-1]
-        if padding <= self.block_size:
-            # Проверяем, является ли это корректным дополнением
-            if all(b == padding for b in result[-padding:]):
-                result = result[:-padding]
+        if result:
+            padding = result[-1]
+            if 1 <= padding <= self.block_size:
+                # Проверяем, является ли это корректным дополнением
+                if all(b == padding for b in result[-padding:]):
+                    result = result[:-padding]
 
         return result
 
