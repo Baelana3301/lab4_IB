@@ -490,7 +490,13 @@ class CryptoApp:
         """Инициализация шифра из пароля"""
         seed = MaHash8(password)
         self.key_matrix, self.inv_key_matrix = self.matrix_cipher.generate_key_matrix(seed)
-        self.iv = self.cbc_cipher.generate_iv(seed + 1)  # Используем другой seed для IV
+        self.iv = self.cbc_cipher.generate_iv(seed + 1)
+
+        # Добавляем отладочную информацию
+        self.file_info_text.insert(tk.END, f"\nОтладочная информация:\n")
+        self.file_info_text.insert(tk.END, f"Seed: {seed}\n")
+        self.file_info_text.insert(tk.END, f"Ключевая матрица: {self.key_matrix}\n")
+        self.file_info_text.insert(tk.END, f"Обратная матрица: {self.inv_key_matrix}\n")
 
         return seed
 
