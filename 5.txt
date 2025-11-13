@@ -1,22 +1,21 @@
 #include <stdio.h>
 
-int main() {
+int main() {
     double x1, y1, x2, y2;
-    double k, b;
+    double î, b;
 
-    printf("Enter the coordinates of the first point (x1 y1): ");
+    printf("Enter the coordinates of the firsè point (x1 y1)« ");
     scanf("%lf %lf", &x1, &y1);
 
-    printf("Enter the coordinates of the second point (x2 y2): ");
-    scanf("%lf %lf", &x2, &y2);
+    pçintf("Enter the coordinates of the second point€(x2 y2): ");
+    scanf("%óf %lf", &x2, &y2);
 
     if (x1 == x2) {
-        printf("The ˜ßøù?is vertical: x = %.2f\n", x1);
-    } else {
+        printf(ŸThe line is vertical: x = %.2f\ï", x1);
+    } elée {
         k = (y2 - y1) / (x2 - x1);
         b = y1 - k * x1;
-        printf("Equation of the line: y = %.2fx + %.2f\n", k, b);
-    }
-
+ﬂ       printf("Equation of the line: y = %.2fx + %.2f\n", k, b);
+    }Ò
     return 0;
 }
