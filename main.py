@@ -91,11 +91,12 @@ class ParkMillerGenerator:
         """Генерация случайного числа в заданном диапазоне"""
         return min_val + int(self.next_float() * (max_val - min_val + 1))
 
-# Класс для матричного шифрования с целочисленной арифметикой
+
+# Класс для матричного шифрования с исправлениями
 class MatrixCipher:
     def __init__(self, block_size=5):
         self.block_size = block_size
-        self.modulus = 257  # Простое число для модульной арифметики
+        self.modulus = 251  # Используем простое число меньше 256
 
     def mod_inverse(self, a, m):
         """Вычисление модульного обратного числа"""
@@ -122,17 +123,16 @@ class MatrixCipher:
             for i in range(self.block_size):
                 row = []
                 for j in range(self.block_size):
-                    row.append(gen.next_int_range(1, 10))
+                    row.append(gen.next_int_range(1, 50))  # Увеличиваем диапазон для лучшей случайности
                 matrix.append(row)
 
             # Проверяем обратимость в модульной арифметике
             try:
-                # Преобразуем в numpy array для вычисления определителя
-                np_matrix = np.array(matrix, dtype=np.int64)
-                det = int(round(np.linalg.det(np_matrix)))
+                # Вычисляем определитель вручную для модульной арифметики
+                det = self.determinant_mod(matrix)
 
                 # Проверяем, что определитель обратим по модулю
-                if det % self.modulus == 0:
+                if det == 0:
                     continue
 
                 # Вычисляем обратную матрицу вручную для модульной арифметики
@@ -142,6 +142,30 @@ class MatrixCipher:
             except Exception as e:
                 continue
 
+    def determinant_mod(self, matrix):
+        """Вычисление определителя в модульной арифметике"""
+        n = len(matrix)
+        if n == 1:
+            return matrix[0][0] % self.modulus
+
+        det = 0
+        for j in range(n):
+            # Создаем минор
+            minor = []
+            for i in range(1, n):
+                row = []
+                for k in range(n):
+                    if k != j:
+                        row.append(matrix[i][k])
+                minor.append(row)
+
+            # Рекурсивно вычисляем определитель минора
+            minor_det = self.determinant_mod(minor)
+            sign = 1 if j % 2 == 0 else -1
+            det = (det + sign * matrix[0][j] * minor_det) % self.modulus
+
+        return det
+
     def compute_modular_inverse(self, matrix):
         """Вычисление обратной матрицы в модульной арифметике"""
         n = len(matrix)
@@ -150,7 +174,7 @@ class MatrixCipher:
         for i in range(n):
             row = []
             for j in range(n):
-                row.append(matrix[i][j])
+                row.append(matrix[i][j] % self.modulus)
             for j in range(n):
                 row.append(1 if i == j else 0)
             augmented.append(row)
@@ -186,7 +210,7 @@ class MatrixCipher:
         for i in range(n):
             row = []
             for j in range(n):
-                row.append(augmented[i][n + j])
+                row.append(augmented[i][n + j] % self.modulus)
             inv_matrix.append(row)
 
         return inv_matrix
@@ -194,7 +218,7 @@ class MatrixCipher:
     def encrypt_block(self, block, key_matrix):
         """Шифрование одного блока матричным методом"""
         if len(block) < self.block_size:
-            # Дополняем блок нулями
+            # Дополняем блок нулями, но сохраняем оригинальную длину
             padding = self.block_size - len(block)
             block = block + bytes([0] * padding)
 
@@ -246,18 +270,19 @@ class CBCCipher:
 
     def encrypt(self, data, key_matrix, iv):
         """Шифрование в режиме CBC"""
-        blocks = []
-        for i in range(0, len(data), self.block_size):
-            block = data[i:i + self.block_size]
-            blocks.append(block)
+        # Добавляем информацию о длине исходных данных
+        original_length = len(data)
+        length_info = original_length.to_bytes(4, 'big')
+        data_with_length = length_info + data
 
-        # Дополняем последний блок по стандарту PKCS7
-        if len(blocks[-1]) < self.block_size:
-            padding = self.block_size - len(blocks[-1])
-            blocks[-1] = blocks[-1] + bytes([padding] * padding)
-        else:
-            # Добавляем целый блок дополнения если блок полный
-            blocks.append(bytes([self.block_size] * self.block_size))
+        blocks = []
+        for i in range(0, len(data_with_length), self.block_size):
+            block = data_with_length[i:i + self.block_size]
+            if len(block) < self.block_size:
+                # Дополняем последний блок по стандарту PKCS7
+                padding = self.block_size - len(block)
+                block = block + bytes([padding] * padding)
+            blocks.append(block)
 
         encrypted_blocks = []
         prev_block = iv
@@ -298,16 +323,25 @@ class CBCCipher:
             decrypted_blocks.append(xor_block)
             prev_block = block
 
-        # Убираем дополнение PKCS7
+        # Объединяем все блоки
         result = b''.join(decrypted_blocks)
-        if result:
-            padding = result[-1]
-            if 1 <= padding <= self.block_size:
-                # Проверяем, является ли это корректным дополнением
-                if all(b == padding for b in result[-padding:]):
-                    result = result[:-padding]
 
-        return result
+        # Извлекаем информацию о длине
+        if len(result) >= 4:
+            original_length = int.from_bytes(result[:4], 'big')
+            result_data = result[4:4 + original_length]
+
+            # Убираем дополнение PKCS7 только из реальных данных
+            if result_data:
+                padding = result_data[-1]
+                if 1 <= padding <= self.block_size:
+                    # Проверяем, является ли это корректным дополнением
+                    if all(b == padding for b in result_data[-padding:]):
+                        result_data = result_data[:-padding]
+
+            return result_data
+        else:
+            return result
 
 
 # Основной класс приложения
@@ -526,10 +560,17 @@ class CryptoApp:
             mode = self.cipher_mode.get()
 
             if mode == "matrix":
-                # Матричное шифрование (простой режим)
+                # Матричное шифрование (простой режим) с сохранением длины
+                original_length = len(file_data)
+                length_info = original_length.to_bytes(4, 'big')
+                data_with_length = length_info + file_data
+
                 blocks = []
-                for i in range(0, len(file_data), self.block_size):
-                    block = file_data[i:i + self.block_size]
+                for i in range(0, len(data_with_length), self.block_size):
+                    block = data_with_length[i:i + self.block_size]
+                    if len(block) < self.block_size:
+                        padding = self.block_size - len(block)
+                        block = block + bytes([0] * padding)
                     blocks.append(block)
 
                 encrypted_blocks = []
@@ -598,7 +639,7 @@ class CryptoApp:
             mode = self.cipher_mode.get()
 
             if mode == "matrix":
-                # Матричное дешифрование (простой режим)
+                # Матричное дешифрование (простой режим) с восстановлением длины
                 blocks = []
                 for i in range(0, len(encrypted_data), self.block_size):
                     block = encrypted_data[i:i + self.block_size]
@@ -616,7 +657,16 @@ class CryptoApp:
                     self.progress_var.set(progress)
                     self.root.update()
 
-                self.processed_data = b''.join(decrypted_blocks)
+                # Объединяем все блоки
+                all_data = b''.join(decrypted_blocks)
+
+                # Извлекаем информацию о длине
+                if len(all_data) >= 4:
+                    original_length = int.from_bytes(all_data[:4], 'big')
+                    self.processed_data = all_data[4:4 + original_length]
+                else:
+                    self.processed_data = all_data
+
                 mode_name = "Матричное шифрование"
 
             else:  # CBC режим
@@ -632,9 +682,7 @@ class CryptoApp:
 
             # Попытка показать превью для текста
             try:
-                # Убираем нулевые байты в конце (дополнение)
-                clean_data = self.processed_data.rstrip(b'\x00')
-                text_preview = clean_data.decode('utf-8', errors='replace')
+                text_preview = self.processed_data.decode('utf-8', errors='replace')
                 self.file_info_text.insert(tk.END, f"\nПревью:\n{text_preview}")
                 if len(text_preview) > 200:
                     self.file_info_text.insert(tk.END, "\n... (данные обрезаны)")
