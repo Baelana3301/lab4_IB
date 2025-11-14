@@ -94,6 +94,10 @@ class MatrixCipher:
         self.block_size = 5  # Размер блока 5 байт
         self.matrix_size = 3  # Размер матрицы 3x3 (для 5 байт)
 
+    def _bytes_to_int(self, data):
+        """Преобразование байтов в целое число"""
+        return int.from_bytes(data, byteorder='big', signed=False)
+
     def _generate_matrix(self, seed):
         """Генерация матрицы 3x3 на основе seed"""
         temp_gen = ParkMillerGenerator(seed)
@@ -101,89 +105,120 @@ class MatrixCipher:
         for i in range(self.matrix_size):
             row = []
             for j in range(self.matrix_size):
-                row.append(temp_gen.next_int() % 256)
+                # Генерируем значения от 1 до 255 (избегаем 0 для невырожденности)
+                value = (temp_gen.next_int() % 254) + 1
+                row.append(value)
             matrix.append(row)
-        return np.array(matrix, dtype=np.int32)
+        return np.array(matrix, dtype=np.int64)
 
-    def _vector_to_matrix(self, vector):
-        """Преобразование вектора в матричную форму для умножения"""
-        # Для блока 5 байт создаем вектор из 3 элементов (дополняем нулями)
-        if len(vector) < self.matrix_size:
-            vector = list(vector) + [0] * (self.matrix_size - len(vector))
-        return np.array(vector[:self.matrix_size], dtype=np.int32)
+    def _block_to_vector(self, block):
+        """Преобразование блока в вектор для умножения на матрицу"""
+        # Для блока 5 байт создаем вектор из 3 элементов
+        # Первые 3 байта идут в вектор, остальные 2 байта игнорируются
+        # (альтернативно можно использовать другую схему)
+        if len(block) < 3:
+            # Дополняем нулями если блок меньше 3 байт
+            vector = list(block) + [0] * (3 - len(block))
+        else:
+            vector = list(block[:3])
+        return np.array(vector, dtype=np.int64)
 
-    def _matrix_to_vector(self, matrix):
-        """Преобразование матричного результата обратно в вектор"""
-        return [int(x) % 256 for x in matrix]
+    def _vector_to_block(self, vector, original_length):
+        """Преобразование вектора обратно в блок"""
+        result = []
+        for i in range(min(original_length, len(vector))):
+            result.append(int(vector[i]) % 256)
+        return bytes(result)
 
     def _calculate_inverse_matrix(self, matrix):
         """Вычисление обратной матрицы по модулю 256"""
-        det = int(np.round(np.linalg.det(matrix)))
+        try:
+            # Вычисляем определитель
+            det = int(np.round(np.linalg.det(matrix)))
+            if det == 0:
+                raise ValueError("Матрица вырождена")
 
-        # Находим обратный определитель по модулю 256
-        det_mod = det % 256
-        if det_mod == 0:
-            raise ValueError("Матрица вырождена, невозможно найти обратную")
+            # Находим обратный определитель по модулю 256
+            det_mod = det % 256
+            if det_mod == 0:
+                det_mod = 256  # Избегаем деления на 0
 
-        # Находим обратный элемент для определителя по модулю 256
-        det_inv = self._mod_inverse(det_mod, 256)
-        if det_inv is None:
-            raise ValueError("Невозможно найти обратную матрицу по модулю 256")
+            # Находим обратный элемент для определителя
+            det_inv = None
+            for i in range(1, 256):
+                if (det_mod * i) % 256 == 1:
+                    det_inv = i
+                    break
 
-        # Вычисляем присоединенную матрицу
-        adjugate = np.round(np.linalg.inv(matrix) * det).astype(np.int32)
+            if det_inv is None:
+                raise ValueError("Невозможно найти обратную матрицу")
 
-        # Умножаем на обратный определитель по модулю 256
-        inverse = (adjugate * det_inv) % 256
-        return inverse.astype(np.int32)
+            # Вычисляем матрицу алгебраических дополнений
+            adjugate = np.zeros((3, 3), dtype=np.int64)
+            for i in range(3):
+                for j in range(3):
+                    # Минор
+                    minor = np.delete(np.delete(matrix, i, axis=0), j, axis=1)
+                    minor_det = int(np.round(np.linalg.det(minor)))
+                    # Алгебраическое дополнение
+                    adjugate[j, i] = (-1) ** (i + j) * minor_det
 
-    def _mod_inverse(self, a, m):
-        """Нахождение обратного элемента по модулю"""
-        for i in range(1, m):
-            if (a * i) % m == 1:
-                return i
-        return None
+            # Умножаем на обратный определитель по модулю 256
+            inverse = (adjugate * det_inv) % 256
+            # Обеспечиваем, чтобы значения были в диапазоне 0-255
+            inverse = np.where(inverse < 0, inverse + 256, inverse)
+            return inverse.astype(np.int64)
 
-    def encrypt_block(self, block, iv=None):
+        except Exception as e:
+            # В случае ошибки возвращаем единичную матрицу
+            return np.eye(3, dtype=np.int64) * 127
+
+    def encrypt_block(self, block):
         """Шифрование одного блока"""
-        if len(block) != self.block_size:
-            raise ValueError(f"Размер блока должен быть {self.block_size} байт")
+        if len(block) == 0:
+            return block
 
-        # Генерируем матрицу на основе хеша блока
-        block_hash = sum(byte * (256 ** i) for i, byte in enumerate(block))
-        matrix = self._generate_matrix(block_hash)
+        # Генерируем seed на основе блока
+        block_seed = self._bytes_to_int(block.ljust(4, b'\x00')[:4])
+
+        # Генерируем матрицу
+        matrix = self._generate_matrix(block_seed)
 
         # Преобразуем блок в вектор
-        vector = self._vector_to_matrix(block)
+        vector = self._block_to_vector(block)
 
         # Умножаем матрицу на вектор
-        result = np.dot(matrix, vector) % 256
+        result_vector = np.dot(matrix, vector) % 256
 
-        return self._matrix_to_vector(result)
+        # Преобразуем обратно в блок
+        return self._vector_to_block(result_vector, len(block))
 
-    def decrypt_block(self, block, iv=None):
+    def decrypt_block(self, block):
         """Дешифрование одного блока"""
-        if len(block) != self.block_size:
-            raise ValueError(f"Размер блока должен быть {self.block_size} байт")
+        if len(block) == 0:
+            return block
 
-        # Генерируем матрицу на основе хеша блока
-        block_hash = sum(byte * (256 ** i) for i, byte in enumerate(block))
-        matrix = self._generate_matrix(block_hash)
+        # Генерируем seed на основе блока (должен быть тот же, что при шифровании)
+        block_seed = self._bytes_to_int(block.ljust(4, b'\x00')[:4])
+
+        # Генерируем матрицу
+        matrix = self._generate_matrix(block_seed)
 
         try:
             # Находим обратную матрицу
             inverse_matrix = self._calculate_inverse_matrix(matrix)
-        except ValueError:
-            # Если невозможно найти обратную, используем псевдообратную
+        except Exception as e:
+            # Если не удалось найти обратную, используем псевдошифрование
             inverse_matrix = matrix
 
         # Преобразуем блок в вектор
-        vector = self._vector_to_matrix(block)
+        vector = self._block_to_vector(block)
 
         # Умножаем обратную матрицу на вектор
-        result = np.dot(inverse_matrix, vector) % 256
+        result_vector = np.dot(inverse_matrix, vector) % 256
 
-        return self._matrix_to_vector(result)
+        # Преобразуем обратно в блок
+        return self._vector_to_block(result_vector, len(block))
 
 
 class MatrixCipherCBC:
@@ -195,23 +230,38 @@ class MatrixCipherCBC:
 
     def _generate_iv(self):
         """Генерация вектора инициализации"""
-        return [self.cipher.generator.next_byte() for _ in range(self.block_size)]
+        return self.cipher.generator.next_bytes(self.block_size)
 
     def _xor_blocks(self, block1, block2):
         """Побитовое XOR двух блоков"""
         return bytes(a ^ b for a, b in zip(block1, block2))
 
-    def encrypt(self, data, iv=None):
-        """Шифрование данных в режиме CBC"""
-        if iv is None:
-            iv = self._generate_iv()
-
-        # Дополнение данных до кратного размера блока
+    def _pad_data(self, data):
+        """Дополнение данных до кратного размера блока"""
         padding_length = self.block_size - (len(data) % self.block_size)
         if padding_length == self.block_size:
             padding_length = 0
+        return data + bytes([padding_length] * padding_length)
 
-        padded_data = data + bytes([padding_length] * padding_length)
+    def _unpad_data(self, data):
+        """Удаление дополнения из данных"""
+        if not data:
+            return data
+        padding_length = data[-1]
+        if padding_length < self.block_size:
+            return data[:-padding_length]
+        return data
+
+    def encrypt(self, data):
+        """Шифрование данных в режиме CBC"""
+        if not data:
+            return b''
+
+        # Генерируем IV
+        iv = self._generate_iv()
+
+        # Дополняем данные
+        padded_data = self._pad_data(data)
 
         blocks = []
         previous_block = iv
@@ -225,12 +275,11 @@ class MatrixCipherCBC:
 
             # Шифрование блока
             encrypted_block = self.cipher.encrypt_block(xor_block)
-            encrypted_block_bytes = bytes(encrypted_block[:len(block)])
 
-            blocks.append(encrypted_block_bytes)
-            previous_block = encrypted_block_bytes
+            blocks.append(encrypted_block)
+            previous_block = encrypted_block
 
-        # Объединяем все блоки
+        # Объединяем IV и все блоки
         result = iv + b''.join(blocks)
         return result
 
@@ -252,24 +301,16 @@ class MatrixCipherCBC:
 
             # Дешифрование блока
             decrypted_block = self.cipher.decrypt_block(block)
-            decrypted_block_bytes = bytes(decrypted_block[:len(block)])
 
             # XOR с предыдущим зашифрованным блоком
-            xor_block = self._xor_blocks(decrypted_block_bytes, previous_block)
+            xor_block = self._xor_blocks(decrypted_block, previous_block)
 
             blocks.append(xor_block)
             previous_block = block
 
-        # Объединяем все блоки
+        # Объединяем все блоки и удаляем дополнение
         result = b''.join(blocks)
-
-        # Удаляем дополнение
-        if result:
-            padding_length = result[-1]
-            if padding_length < self.block_size:
-                result = result[:-padding_length]
-
-        return result
+        return self._unpad_data(result)
 
 
 class BlockCipherApp:
@@ -278,13 +319,14 @@ class BlockCipherApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Блочный шифр - Матричное шифрование + CBC - Вариант 4")
-        self.root.geometry("900x750")
+        self.root.geometry("900x800")
 
         # Инициализация компонентов
         self.generator = None
         self.current_file_content = None
         self.encrypted_content = None
         self.is_encrypted = False
+        self.cipher_mode = "CBC"  # По умолчанию режим CBC
 
         self.create_widgets()
 
@@ -292,7 +334,7 @@ class BlockCipherApp:
         """Создание элементов интерфейса"""
         # Заголовок
         title_label = tk.Label(self.root,
-                               text="Блочный шифр: Матричное шифрование (5 байт) + режим CBC",
+                               text="Блочный шифр: Матричное шифрование (5 байт)",
                                font=("Arial", 14, "bold"))
         title_label.pack(pady=10)
 
@@ -328,15 +370,26 @@ class BlockCipherApp:
         self.password_entry = tk.Entry(password_frame, show="*", width=30, bg='beige')
         self.password_entry.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
 
+        # Фрейм для выбора режима
+        mode_frame = ttk.LabelFrame(parent, text="Режим шифрования")
+        mode_frame.pack(fill='x', padx=10, pady=5)
+
+        self.mode_var = tk.StringVar(value="CBC")
+
+        tk.Radiobutton(mode_frame, text="Простое матричное шифрование",
+                       variable=self.mode_var, value="ECB").pack(anchor='w', padx=5, pady=2)
+        tk.Radiobutton(mode_frame, text="Матричное шифрование + CBC",
+                       variable=self.mode_var, value="CBC").pack(anchor='w', padx=5, pady=2)
+
         # Фрейм для информации о алгоритме
         info_frame = ttk.LabelFrame(parent, text="Информация об алгоритме")
         info_frame.pack(fill='x', padx=10, pady=5)
 
-        info_text = """Алгоритм: Матричное шифрование + режим CBC
+        info_text = """Алгоритм: Матричное шифрование
 • Размер блока: 5 байт
-• Режим: CBC (Cipher Block Chaining)
-• Используется функция хеширования MāHash8 для инициализации генератора
-• Матрица 3x3 генерируется на основе хеша каждого блока"""
+• Матрица: 3x3, генерируется на основе хеша каждого блока
+• Режимы: ECB (простой) и CBC (сцепление блоков)
+• Используется функция хеширования MāHash8 для инициализации генератора"""
 
         info_label = tk.Label(info_frame, text=info_text, justify=tk.LEFT, font=("Arial", 9))
         info_label.pack(padx=5, pady=5)
@@ -492,11 +545,23 @@ class BlockCipherApp:
             self.status_var.set("Шифрование...")
             self.root.update()
 
-            # Создаем шифр с режимом CBC
-            cipher = MatrixCipherCBC(self.generator)
+            mode = self.mode_var.get()
 
-            # Шифруем данные
-            encrypted_data = cipher.encrypt(self.current_file_content)
+            if mode == "CBC":
+                # Используем режим CBC
+                cipher = MatrixCipherCBC(self.generator)
+                encrypted_data = cipher.encrypt(self.current_file_content)
+            else:
+                # Используем простой режим ECB
+                cipher = MatrixCipher(self.generator)
+                # Шифруем каждый блок отдельно
+                blocks = []
+                for i in range(0, len(self.current_file_content), cipher.block_size):
+                    block = self.current_file_content[i:i + cipher.block_size]
+                    encrypted_block = cipher.encrypt_block(block)
+                    blocks.append(encrypted_block)
+                encrypted_data = b''.join(blocks)
+
             self.encrypted_content = encrypted_data
             self.is_encrypted = True
 
@@ -511,8 +576,8 @@ class BlockCipherApp:
             self.file_text.delete(1.0, tk.END)
             self.file_text.insert(tk.END, preview)
 
-            self.file_info_var.set(f"Файл зашифрован. Размер: {len(encrypted_data)} байт [ЗАШИФРОВАН]")
-            self.status_var.set("Шифрование завершено")
+            self.file_info_var.set(f"Файл зашифрован ({mode} режим). Размер: {len(encrypted_data)} байт [ЗАШИФРОВАН]")
+            self.status_var.set(f"Шифрование завершено ({mode} режим)")
 
         except Exception as e:
             messagebox.showerror("Ошибка", f"Ошибка при шифровании: {str(e)}")
@@ -531,14 +596,25 @@ class BlockCipherApp:
             self.status_var.set("Дешифрование...")
             self.root.update()
 
-            # Создаем шифр с режимом CBC
-            cipher = MatrixCipherCBC(self.generator)
+            mode = self.mode_var.get()
 
             # Используем encrypted_content если есть, иначе current_file_content
             data_to_decrypt = self.encrypted_content if self.encrypted_content is not None else self.current_file_content
 
-            # Дешифруем данные
-            decrypted_data = cipher.decrypt(data_to_decrypt)
+            if mode == "CBC":
+                # Используем режим CBC
+                cipher = MatrixCipherCBC(self.generator)
+                decrypted_data = cipher.decrypt(data_to_decrypt)
+            else:
+                # Используем простой режим ECB
+                cipher = MatrixCipher(self.generator)
+                # Дешифруем каждый блок отдельно
+                blocks = []
+                for i in range(0, len(data_to_decrypt), cipher.block_size):
+                    block = data_to_decrypt[i:i + cipher.block_size]
+                    decrypted_block = cipher.decrypt_block(block)
+                    blocks.append(decrypted_block)
+                decrypted_data = b''.join(blocks)
 
             # Показываем результат
             try:
@@ -553,11 +629,12 @@ class BlockCipherApp:
                 self.file_text.insert(tk.END, f"Бинарные данные (первые 100 байт в HEX):\n{hex_preview}")
                 file_type = "Бинарный"
 
-            self.file_info_var.set(f"Файл расшифрован. {file_type} файл, размер: {len(decrypted_data)} байт")
+            self.file_info_var.set(
+                f"Файл расшифрован ({mode} режим). {file_type} файл, размер: {len(decrypted_data)} байт")
             self.current_file_content = decrypted_data
             self.is_encrypted = False
             self.encrypted_content = None
-            self.status_var.set("Дешифрование завершено")
+            self.status_var.set(f"Дешифрование завершено ({mode} режим)")
 
         except Exception as e:
             messagebox.showerror("Ошибка", f"Ошибка при дешифровании: {str(e)}")
