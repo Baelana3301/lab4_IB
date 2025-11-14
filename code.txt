@@ -93,54 +93,58 @@ class MatrixCipher:
         self.generator = key_generator
         self.block_size = 5  # Размер блока 5 байт
 
-        # Генерируем одну матрицу 5x5 для всего блока
-        self.matrix = self._generate_matrix()
-        self.inverse_matrix = self._calculate_inverse_matrix(self.matrix)
+        # Генерируем набор матриц для каждого байта в блоке
+        self.matrices = self._generate_matrices()
+        self.inverse_matrices = [self._calculate_inverse_matrix(mat) for mat in self.matrices]
 
-    def _generate_matrix(self):
-        """Генерация матрицы 5x5 на основе пароля"""
-        matrix = []
-        for i in range(5):
-            row = []
-            for j in range(5):
-                # Генерируем значения от 1 до 255
-                value = (self.generator.next_int() % 254) + 1
-                row.append(value)
-            matrix.append(row)
-        return np.array(matrix, dtype=np.int64)
-
-    def _mod_inverse(self, a, m=256):
-        """Нахождение обратного элемента по модулю m"""
-        for i in range(1, m):
-            if (a * i) % m == 1:
-                return i
-        return None
+    def _generate_matrices(self):
+        """Генерация набора матриц 3x3 на основе пароля"""
+        matrices = []
+        for _ in range(self.block_size):
+            matrix = []
+            for i in range(3):
+                row = []
+                for j in range(3):
+                    # Генерируем значения от 1 до 255
+                    value = (self.generator.next_int() % 254) + 1
+                    row.append(value)
+                matrix.append(row)
+            matrices.append(np.array(matrix, dtype=np.int64))
+        return matrices
 
     def _calculate_inverse_matrix(self, matrix):
         """Вычисление обратной матрицы по модулю 256"""
         try:
             # Вычисляем определитель
             det = int(np.round(np.linalg.det(matrix)))
-            det_mod = det % 256
+            if det == 0:
+                # Если определитель 0, используем единичную матрицу
+                return np.eye(3, dtype=np.int64)
 
             # Находим обратный определитель по модулю 256
-            det_inv = self._mod_inverse(det_mod, 256)
-            if det_inv is None:
-                # Если обратный не существует, используем единичную матрицу
-                return np.eye(5, dtype=np.int64)
+            det_mod = det % 256
+            if det_mod == 0:
+                det_mod = 256
 
-            # Вычисляем матрицу алгебраических дополнений
-            adjugate = np.zeros((5, 5), dtype=np.int64)
-            for i in range(5):
-                for j in range(5):
+            # Находим обратный элемент для определителя
+            det_inv = None
+            for i in range(1, 256):
+                if (det_mod * i) % 256 == 1:
+                    det_inv = i
+                    break
+
+            if det_inv is None:
+                return np.eye(3, dtype=np.int64)
+
+            # Вычисляем присоединенную матрицу
+            adjugate = np.zeros((3, 3), dtype=np.int64)
+            for i in range(3):
+                for j in range(3):
                     # Минор
                     minor = np.delete(np.delete(matrix, i, axis=0), j, axis=1)
                     minor_det = int(np.round(np.linalg.det(minor)))
                     # Алгебраическое дополнение
-                    adjugate[i, j] = ((-1) ** (i + j) * minor_det) % 256
-
-            # Транспонируем (получаем присоединенную матрицу)
-            adjugate = adjugate.T
+                    adjugate[j, i] = (-1) ** (i + j) * minor_det
 
             # Умножаем на обратный определитель по модулю 256
             inverse = (adjugate * det_inv) % 256
@@ -148,35 +152,47 @@ class MatrixCipher:
             inverse = np.where(inverse < 0, inverse + 256, inverse)
             return inverse.astype(np.int64)
 
-        except Exception as e:
-            print(f"Ошибка при вычислении обратной матрицы: {e}")
+        except Exception:
             # В случае ошибки возвращаем единичную матрицу
-            return np.eye(5, dtype=np.int64)
+            return np.eye(3, dtype=np.int64)
 
-    def _process_block(self, block, matrix):
-        """Обработка блока с использованием матрицы"""
+    def _process_block(self, block, matrices):
+        """Обработка блока с использованием набора матриц"""
         if len(block) < self.block_size:
             # Дополняем блок нулями если он меньше
             block = block + b'\x00' * (self.block_size - len(block))
 
-        # Преобразуем блок в вектор
-        vector = np.array([b for b in block[:self.block_size]], dtype=np.int64)
+        result = bytearray()
 
-        # Умножаем матрицу на вектор
-        result_vector = np.dot(matrix, vector) % 256
+        # Обрабатываем каждый байт в блоке
+        for i, byte_val in enumerate(block):
+            if i < len(matrices):
+                # Создаем вектор из текущего байта и двух следующих
+                vector = []
+                for j in range(3):
+                    idx = (i + j) % len(block)
+                    vector.append(block[idx])
 
-        # Преобразуем результат обратно в байты
-        result = bytes([int(x) % 256 for x in result_vector])
+                vector = np.array(vector, dtype=np.int64)
 
-        return result
+                # Умножаем на матрицу
+                result_vector = np.dot(matrices[i], vector) % 256
+
+                # Берем только первый элемент результата для текущей позиции
+                result.append(int(result_vector[0]) % 256)
+            else:
+                # Если матриц не хватило, просто копируем байт
+                result.append(byte_val)
+
+        return bytes(result)
 
     def encrypt_block(self, block):
         """Шифрование одного блока"""
-        return self._process_block(block, self.matrix)
+        return self._process_block(block, self.matrices)
 
     def decrypt_block(self, block):
         """Дешифрование одного блока"""
-        return self._process_block(block, self.inverse_matrix)
+        return self._process_block(block, self.inverse_matrices)
 
 
 class MatrixCipherCBC:
@@ -197,8 +213,8 @@ class MatrixCipherCBC:
     def _pad_data(self, data):
         """Дополнение данных до кратного размера блока"""
         padding_length = self.block_size - (len(data) % self.block_size)
-        if padding_length == 0:
-            padding_length = self.block_size
+        if padding_length == self.block_size:
+            padding_length = 0
         return data + bytes([padding_length] * padding_length)
 
     def _unpad_data(self, data):
@@ -271,10 +287,6 @@ class MatrixCipherCBC:
         # Объединяем все блоки и удаляем дополнение
         result = b''.join(blocks)
         return self._unpad_data(result)
-
-
-# Остальной код приложения остается без изменений...
-# [BlockCipherApp класс и main функция остаются такими же]
 
 
 class BlockCipherApp:
